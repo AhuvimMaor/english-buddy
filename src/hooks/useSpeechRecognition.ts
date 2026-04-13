@@ -10,10 +10,11 @@ import { containsHebrew, extractHebrewWords } from '../utils/hebrewDetector';
 import { translateHebrewToEnglish } from '../services/translationService';
 import { useWordListStore } from '../store/wordListStore';
 
-// Confidence below this threshold triggers Hebrew re-listen
-const LOW_CONFIDENCE_THRESHOLD = 0.55;
-// Number of consecutive low-confidence results before switching
-const LOW_CONFIDENCE_STREAK_TRIGGER = 2;
+// Chrome gives ~0.85+ confidence for real English speech.
+// Hebrew transliterated as English typically gets 0.0-0.8 depending on the word.
+// We use a low threshold to catch obvious gibberish, but the main detection
+// mechanism is tracking "nonsense segments" that get replaced when Hebrew captures.
+const LOW_CONFIDENCE_THRESHOLD = 0.75;
 
 export function useSpeechRecognition() {
   const {
@@ -21,6 +22,7 @@ export function useSpeechRecognition() {
     hebrewMode,
     setRecordingState,
     addSegment,
+    removeLastSegments,
     setInterimText,
     setDetectedLanguage,
     setHebrewMode,
@@ -29,9 +31,11 @@ export function useSpeechRecognition() {
 
   const addWord = useWordListStore((s) => s.addWord);
   const fullTranscriptRef = useRef('');
-  const lowConfidenceStreakRef = useRef(0);
-  const lastLowConfidenceTextRef = useRef('');
   const switchingRef = useRef(false);
+  // Track how many segments were added since we suspected Hebrew
+  const suspectedGarbledCountRef = useRef(0);
+  // Track consecutive low-confidence results
+  const lowConfStreakRef = useRef(0);
 
   useSpeechRecognitionEvent('result', (event) => {
     const transcript = event.results[0]?.transcript ?? '';
@@ -42,7 +46,14 @@ export function useSpeechRecognition() {
 
     if (event.isFinal) {
       if (isHebrewMode) {
-        // Hebrew mode: the recognizer was set to he-IL, so this IS Hebrew
+        // Hebrew mode: recognizer is set to he-IL, this IS Hebrew text.
+        // Remove the garbled English segments that were added before we switched.
+        if (suspectedGarbledCountRef.current > 0) {
+          removeLastSegments(suspectedGarbledCountRef.current);
+          suspectedGarbledCountRef.current = 0;
+        }
+
+        // Add the Hebrew segment
         addSegment({
           text: transcript,
           language: 'he',
@@ -50,6 +61,7 @@ export function useSpeechRecognition() {
           timestamp: Date.now(),
         });
 
+        // Process all words as Hebrew
         const words = transcript.trim().split(/\s+/).filter(Boolean);
         if (words.length > 0) {
           processHebrewWords(words, fullTranscriptRef.current);
@@ -59,6 +71,7 @@ export function useSpeechRecognition() {
         switchingRef.current = true;
         stopListening();
         setHebrewMode(false);
+        lowConfStreakRef.current = 0;
         setTimeout(() => {
           switchingRef.current = false;
           if (useTranscriptionStore.getState().recordingState === 'recording') {
@@ -67,8 +80,8 @@ export function useSpeechRecognition() {
         }, 300);
       } else {
         // English mode
-        // Check if this contains Hebrew characters (Android native detection)
         if (containsHebrew(transcript)) {
+          // Android native detection produced Hebrew characters
           addSegment({
             text: transcript,
             language: 'he',
@@ -79,18 +92,28 @@ export function useSpeechRecognition() {
           if (hebrewWords.length > 0) {
             processHebrewWords(hebrewWords, transcript);
           }
+          lowConfStreakRef.current = 0;
         } else if (confidence < LOW_CONFIDENCE_THRESHOLD) {
-          // Low confidence final result = likely Hebrew that got garbled
-          // Don't add the garbled text — switch to Hebrew to re-capture
-          lowConfidenceStreakRef.current++;
-          lastLowConfidenceTextRef.current = transcript;
+          // Low confidence = likely Hebrew garbled as English
+          lowConfStreakRef.current++;
 
-          if (lowConfidenceStreakRef.current >= LOW_CONFIDENCE_STREAK_TRIGGER) {
-            triggerHebrewSwitch();
-          }
+          // Add the segment but mark it as suspected garbled — we'll remove it
+          // if Hebrew mode confirms it was actually Hebrew
+          addSegment({
+            text: transcript,
+            language: 'en',
+            isFinal: true,
+            timestamp: Date.now(),
+          });
+          suspectedGarbledCountRef.current++;
+
+          // After 1 low-confidence result, immediately switch to Hebrew
+          // to try to capture what the user is actually saying
+          triggerHebrewSwitch();
         } else {
           // Normal high-confidence English
-          lowConfidenceStreakRef.current = 0;
+          lowConfStreakRef.current = 0;
+          suspectedGarbledCountRef.current = 0;
           addSegment({
             text: transcript,
             language: 'en',
@@ -108,13 +131,11 @@ export function useSpeechRecognition() {
       } else if (containsHebrew(transcript)) {
         setInterimText(transcript);
         setDetectedLanguage('he');
-      } else if (confidence > 0 && confidence < LOW_CONFIDENCE_THRESHOLD) {
-        // Show interim text but mark it as uncertain
-        setInterimText(transcript);
-        setDetectedLanguage('he'); // Signal that we're detecting something off
       } else {
         setInterimText(transcript);
-        setDetectedLanguage('en');
+        setDetectedLanguage(
+          confidence > 0 && confidence < LOW_CONFIDENCE_THRESHOLD ? 'he' : 'en'
+        );
       }
     }
   });
@@ -123,7 +144,6 @@ export function useSpeechRecognition() {
   useSpeechRecognitionEvent('languagedetection' as any, (event: any) => {
     if (event.detectedLanguage === 'he' || event.detectedLanguage === 'iw') {
       setDetectedLanguage('he');
-      // On Android, auto-switch to Hebrew if not already
       if (!useTranscriptionStore.getState().hebrewMode) {
         triggerHebrewSwitch();
       }
@@ -137,9 +157,9 @@ export function useSpeechRecognition() {
     const state = useTranscriptionStore.getState();
 
     if (state.hebrewMode) {
-      // Error in Hebrew mode — switch back to English
       switchingRef.current = true;
       setHebrewMode(false);
+      suspectedGarbledCountRef.current = 0;
       setTimeout(() => {
         switchingRef.current = false;
         if (useTranscriptionStore.getState().recordingState === 'recording') {
@@ -147,7 +167,6 @@ export function useSpeechRecognition() {
         }
       }, 300);
     } else if (event.error === 'no-speech') {
-      // No speech detected — could be a pause, just restart
       if (state.recordingState === 'recording') {
         startListening('en-US');
       }
@@ -170,7 +189,7 @@ export function useSpeechRecognition() {
   const triggerHebrewSwitch = useCallback(() => {
     if (switchingRef.current) return;
     switchingRef.current = true;
-    lowConfidenceStreakRef.current = 0;
+    lowConfStreakRef.current = 0;
 
     stopListening();
     setHebrewMode(true);
@@ -223,7 +242,8 @@ export function useSpeechRecognition() {
       stopListening();
       setRecordingState('idle');
       setHebrewMode(false);
-      lowConfidenceStreakRef.current = 0;
+      lowConfStreakRef.current = 0;
+      suspectedGarbledCountRef.current = 0;
       switchingRef.current = false;
     } else {
       const granted = await requestPermissions();
@@ -233,7 +253,8 @@ export function useSpeechRecognition() {
       }
       setRecordingState('recording');
       fullTranscriptRef.current = '';
-      lowConfidenceStreakRef.current = 0;
+      lowConfStreakRef.current = 0;
+      suspectedGarbledCountRef.current = 0;
       startListening('en-US');
     }
   }, [recordingState, setRecordingState, setHebrewMode]);

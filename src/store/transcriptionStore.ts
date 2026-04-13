@@ -11,6 +11,7 @@ interface TranscriptionState {
 
   setRecordingState: (state: RecordingState) => void;
   addSegment: (segment: TranscriptSegment) => void;
+  removeLastSegments: (count: number) => void;
   setInterimText: (text: string) => void;
   setDetectedLanguage: (lang: 'en' | 'he') => void;
   setHebrewMode: (mode: boolean) => void;
@@ -32,6 +33,11 @@ export const useTranscriptionStore = create<TranscriptionState>((set) => ({
     set((state) => ({
       segments: [...state.segments, segment],
       interimText: '',
+    })),
+
+  removeLastSegments: (count) =>
+    set((state) => ({
+      segments: state.segments.slice(0, -count),
     })),
 
   setInterimText: (interimText) => set({ interimText }),

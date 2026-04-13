@@ -1,33 +1,74 @@
 import React, { useRef, useEffect } from 'react';
 import { ScrollView, View, Text, StyleSheet } from 'react-native';
 import { useTranscriptionStore } from '../store/transcriptionStore';
+import { useWordListStore } from '../store/wordListStore';
 import { splitByLanguage } from '../utils/hebrewDetector';
 import { WordBadge } from './WordBadge';
+import type { TranscriptSegment } from '../types';
 
 export function TranscriptionDisplay() {
   const scrollRef = useRef<ScrollView>(null);
   const segments = useTranscriptionStore((s) => s.segments);
   const interimText = useTranscriptionStore((s) => s.interimText);
+  const hebrewMode = useTranscriptionStore((s) => s.hebrewMode);
+  const savedWords = useWordListStore((s) => s.words);
 
   useEffect(() => {
     scrollRef.current?.scrollToEnd({ animated: true });
   }, [segments, interimText]);
 
-  const renderText = (text: string, isFinal: boolean) => {
-    const parts = splitByLanguage(text);
-    return parts.map((part, index) => {
-      if (part.isHebrew) {
-        return <WordBadge key={index} hebrew={part.text} />;
-      }
+  const renderSegment = (segment: TranscriptSegment, index: number) => {
+    // If segment is marked as Hebrew, render entire segment as badges
+    if (segment.language === 'he') {
+      const words = segment.text.trim().split(/\s+/);
       return (
-        <Text
-          key={index}
-          style={[styles.word, !isFinal && styles.interim]}
-        >
-          {part.text}{' '}
-        </Text>
+        <React.Fragment key={index}>
+          {words.map((word, i) => {
+            const saved = savedWords.find((w) => w.hebrew === word);
+            return (
+              <WordBadge
+                key={`${index}-${i}`}
+                hebrew={word}
+                english={saved?.english}
+              />
+            );
+          })}
+        </React.Fragment>
       );
-    });
+    }
+
+    // English segment — still check for inline Hebrew characters (Android)
+    const parts = splitByLanguage(segment.text);
+    return (
+      <React.Fragment key={index}>
+        {parts.map((part, i) => {
+          if (part.isHebrew) {
+            const saved = savedWords.find((w) => w.hebrew === part.text);
+            return (
+              <WordBadge
+                key={`${index}-${i}`}
+                hebrew={part.text}
+                english={saved?.english}
+              />
+            );
+          }
+          return (
+            <Text key={`${index}-${i}`} style={styles.word}>
+              {part.text}{' '}
+            </Text>
+          );
+        })}
+      </React.Fragment>
+    );
+  };
+
+  const renderInterim = () => {
+    if (!interimText) return null;
+    return (
+      <Text style={[styles.word, styles.interim, hebrewMode && styles.hebrewInterim]}>
+        {interimText}
+      </Text>
+    );
   };
 
   const hasContent = segments.length > 0 || interimText;
@@ -51,12 +92,8 @@ export function TranscriptionDisplay() {
       )}
 
       <View style={styles.textContainer}>
-        {segments.map((segment, index) => (
-          <React.Fragment key={index}>
-            {renderText(segment.text, true)}
-          </React.Fragment>
-        ))}
-        {interimText ? renderText(interimText, false) : null}
+        {segments.map(renderSegment)}
+        {renderInterim()}
       </View>
     </ScrollView>
   );
@@ -82,6 +119,10 @@ const styles = StyleSheet.create({
   },
   interim: {
     color: '#95a5a6',
+  },
+  hebrewInterim: {
+    color: '#e67e22',
+    fontWeight: '600',
   },
   placeholder: {
     flex: 1,
