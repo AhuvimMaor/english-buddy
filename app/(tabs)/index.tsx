@@ -6,11 +6,9 @@ import { TranscriptionDisplay } from '@/src/components/TranscriptionDisplay';
 import { RecordButton } from '@/src/components/RecordButton';
 import { LanguageIndicator } from '@/src/components/LanguageIndicator';
 import { DetectedWordsStrip } from '@/src/components/DetectedWordsStrip';
-import { HebrewToggle } from '@/src/components/HebrewToggle';
 
 export default function SpeakScreen() {
-  const { toggleRecording, switchToHebrew, recordingState, hebrewMode } =
-    useSpeechRecognition();
+  const { toggleRecording, recordingState } = useSpeechRecognition();
   const detectedLanguage = useTranscriptionStore((s) => s.detectedLanguage);
 
   return (
@@ -27,11 +25,6 @@ export default function SpeakScreen() {
       <DetectedWordsStrip />
 
       <View style={styles.controls}>
-        <HebrewToggle
-          isHebrewMode={hebrewMode}
-          isRecording={recordingState === 'recording'}
-          onPress={switchToHebrew}
-        />
         <RecordButton
           recordingState={recordingState}
           onPress={toggleRecording}
@@ -53,11 +46,10 @@ const styles = StyleSheet.create({
   },
   controls: {
     alignItems: 'center',
-    paddingVertical: 16,
+    paddingVertical: 20,
     paddingBottom: 8,
     backgroundColor: '#fff',
     borderTopWidth: 1,
     borderTopColor: '#ecf0f1',
-    gap: 12,
   },
 });

@@ -10,6 +10,11 @@ import { containsHebrew, extractHebrewWords } from '../utils/hebrewDetector';
 import { translateHebrewToEnglish } from '../services/translationService';
 import { useWordListStore } from '../store/wordListStore';
 
+// Confidence below this threshold triggers Hebrew re-listen
+const LOW_CONFIDENCE_THRESHOLD = 0.55;
+// Number of consecutive low-confidence results before switching
+const LOW_CONFIDENCE_STREAK_TRIGGER = 2;
+
 export function useSpeechRecognition() {
   const {
     recordingState,
@@ -24,15 +29,20 @@ export function useSpeechRecognition() {
 
   const addWord = useWordListStore((s) => s.addWord);
   const fullTranscriptRef = useRef('');
+  const lowConfidenceStreakRef = useRef(0);
+  const lastLowConfidenceTextRef = useRef('');
+  const switchingRef = useRef(false);
 
-  // Handle speech recognition results
   useSpeechRecognitionEvent('result', (event) => {
     const transcript = event.results[0]?.transcript ?? '';
+    const confidence = event.results[0]?.confidence ?? 1;
     const isHebrewMode = useTranscriptionStore.getState().hebrewMode;
+
+    if (switchingRef.current) return;
 
     if (event.isFinal) {
       if (isHebrewMode) {
-        // In Hebrew mode: entire transcript is Hebrew
+        // Hebrew mode: the recognizer was set to he-IL, so this IS Hebrew
         addSegment({
           text: transcript,
           language: 'he',
@@ -40,45 +50,70 @@ export function useSpeechRecognition() {
           timestamp: Date.now(),
         });
 
-        // Process all words as Hebrew
         const words = transcript.trim().split(/\s+/).filter(Boolean);
         if (words.length > 0) {
           processHebrewWords(words, fullTranscriptRef.current);
         }
 
         // Auto-switch back to English
+        switchingRef.current = true;
         stopListening();
         setHebrewMode(false);
-        // Restart in English after a brief delay
         setTimeout(() => {
+          switchingRef.current = false;
           if (useTranscriptionStore.getState().recordingState === 'recording') {
             startListening('en-US');
           }
         }, 300);
       } else {
-        // Normal English mode
-        addSegment({
-          text: transcript,
-          language: containsHebrew(transcript) ? 'he' : 'en',
-          isFinal: true,
-          timestamp: Date.now(),
-        });
-        fullTranscriptRef.current += ' ' + transcript;
+        // English mode
+        // Check if this contains Hebrew characters (Android native detection)
+        if (containsHebrew(transcript)) {
+          addSegment({
+            text: transcript,
+            language: 'he',
+            isFinal: true,
+            timestamp: Date.now(),
+          });
+          const hebrewWords = extractHebrewWords(transcript);
+          if (hebrewWords.length > 0) {
+            processHebrewWords(hebrewWords, transcript);
+          }
+        } else if (confidence < LOW_CONFIDENCE_THRESHOLD) {
+          // Low confidence final result = likely Hebrew that got garbled
+          // Don't add the garbled text — switch to Hebrew to re-capture
+          lowConfidenceStreakRef.current++;
+          lastLowConfidenceTextRef.current = transcript;
 
-        // Check for Hebrew words in final result (for Android native detection)
-        const hebrewWords = extractHebrewWords(transcript);
-        if (hebrewWords.length > 0) {
-          processHebrewWords(hebrewWords, transcript);
+          if (lowConfidenceStreakRef.current >= LOW_CONFIDENCE_STREAK_TRIGGER) {
+            triggerHebrewSwitch();
+          }
+        } else {
+          // Normal high-confidence English
+          lowConfidenceStreakRef.current = 0;
+          addSegment({
+            text: transcript,
+            language: 'en',
+            isFinal: true,
+            timestamp: Date.now(),
+          });
+          fullTranscriptRef.current += ' ' + transcript;
         }
       }
     } else {
-      setInterimText(transcript);
-
+      // Interim results
       if (isHebrewMode) {
+        setInterimText(transcript);
         setDetectedLanguage('he');
       } else if (containsHebrew(transcript)) {
+        setInterimText(transcript);
         setDetectedLanguage('he');
+      } else if (confidence > 0 && confidence < LOW_CONFIDENCE_THRESHOLD) {
+        // Show interim text but mark it as uncertain
+        setInterimText(transcript);
+        setDetectedLanguage('he'); // Signal that we're detecting something off
       } else {
+        setInterimText(transcript);
         setDetectedLanguage('en');
       }
     }
@@ -88,6 +123,10 @@ export function useSpeechRecognition() {
   useSpeechRecognitionEvent('languagedetection' as any, (event: any) => {
     if (event.detectedLanguage === 'he' || event.detectedLanguage === 'iw') {
       setDetectedLanguage('he');
+      // On Android, auto-switch to Hebrew if not already
+      if (!useTranscriptionStore.getState().hebrewMode) {
+        triggerHebrewSwitch();
+      }
     } else {
       setDetectedLanguage('en');
     }
@@ -95,11 +134,22 @@ export function useSpeechRecognition() {
 
   useSpeechRecognitionEvent('error', (event) => {
     console.error('Speech recognition error:', event.error);
-    // If in Hebrew mode and error occurs, switch back to English
-    if (useTranscriptionStore.getState().hebrewMode) {
+    const state = useTranscriptionStore.getState();
+
+    if (state.hebrewMode) {
+      // Error in Hebrew mode — switch back to English
+      switchingRef.current = true;
       setHebrewMode(false);
-      if (useTranscriptionStore.getState().recordingState === 'recording') {
-        setTimeout(() => startListening('en-US'), 300);
+      setTimeout(() => {
+        switchingRef.current = false;
+        if (useTranscriptionStore.getState().recordingState === 'recording') {
+          startListening('en-US');
+        }
+      }, 300);
+    } else if (event.error === 'no-speech') {
+      // No speech detected — could be a pause, just restart
+      if (state.recordingState === 'recording') {
+        startListening('en-US');
       }
     } else {
       setRecordingState('idle');
@@ -108,11 +158,31 @@ export function useSpeechRecognition() {
 
   useSpeechRecognitionEvent('end', () => {
     const state = useTranscriptionStore.getState();
-    // If we're still recording and not in Hebrew mode (Hebrew mode handles its own restart)
-    if (state.recordingState === 'recording' && !state.hebrewMode) {
+    if (
+      state.recordingState === 'recording' &&
+      !state.hebrewMode &&
+      !switchingRef.current
+    ) {
       startListening('en-US');
     }
   });
+
+  const triggerHebrewSwitch = useCallback(() => {
+    if (switchingRef.current) return;
+    switchingRef.current = true;
+    lowConfidenceStreakRef.current = 0;
+
+    stopListening();
+    setHebrewMode(true);
+    setDetectedLanguage('he');
+
+    setTimeout(() => {
+      switchingRef.current = false;
+      if (useTranscriptionStore.getState().recordingState === 'recording') {
+        startListening('he-IL');
+      }
+    }, 300);
+  }, [setHebrewMode, setDetectedLanguage]);
 
   const processHebrewWords = useCallback(
     async (hebrewWords: string[], context: string) => {
@@ -153,6 +223,8 @@ export function useSpeechRecognition() {
       stopListening();
       setRecordingState('idle');
       setHebrewMode(false);
+      lowConfidenceStreakRef.current = 0;
+      switchingRef.current = false;
     } else {
       const granted = await requestPermissions();
       if (!granted) {
@@ -161,18 +233,10 @@ export function useSpeechRecognition() {
       }
       setRecordingState('recording');
       fullTranscriptRef.current = '';
+      lowConfidenceStreakRef.current = 0;
       startListening('en-US');
     }
   }, [recordingState, setRecordingState, setHebrewMode]);
 
-  const switchToHebrew = useCallback(() => {
-    if (recordingState !== 'recording') return;
-    stopListening();
-    setHebrewMode(true);
-    setTimeout(() => {
-      startListening('he-IL');
-    }, 300);
-  }, [recordingState, setHebrewMode]);
-
-  return { toggleRecording, switchToHebrew, recordingState, hebrewMode };
+  return { toggleRecording, recordingState, hebrewMode };
 }
