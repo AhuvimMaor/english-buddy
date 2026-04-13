@@ -6,12 +6,14 @@ interface TranscriptionState {
   segments: TranscriptSegment[];
   interimText: string;
   detectedLanguage: 'en' | 'he';
+  hebrewMode: boolean;
   detectedHebrewWords: DetectedHebrewWord[];
 
   setRecordingState: (state: RecordingState) => void;
   addSegment: (segment: TranscriptSegment) => void;
   setInterimText: (text: string) => void;
   setDetectedLanguage: (lang: 'en' | 'he') => void;
+  setHebrewMode: (mode: boolean) => void;
   addDetectedHebrewWord: (word: DetectedHebrewWord) => void;
   clearSession: () => void;
 }
@@ -21,6 +23,7 @@ export const useTranscriptionStore = create<TranscriptionState>((set) => ({
   segments: [],
   interimText: '',
   detectedLanguage: 'en',
+  hebrewMode: false,
   detectedHebrewWords: [],
 
   setRecordingState: (recordingState) => set({ recordingState }),
@@ -34,6 +37,9 @@ export const useTranscriptionStore = create<TranscriptionState>((set) => ({
   setInterimText: (interimText) => set({ interimText }),
 
   setDetectedLanguage: (detectedLanguage) => set({ detectedLanguage }),
+
+  setHebrewMode: (hebrewMode) =>
+    set({ hebrewMode, detectedLanguage: hebrewMode ? 'he' : 'en' }),
 
   addDetectedHebrewWord: (word) =>
     set((state) => {
@@ -52,6 +58,7 @@ export const useTranscriptionStore = create<TranscriptionState>((set) => ({
       segments: [],
       interimText: '',
       detectedLanguage: 'en',
+      hebrewMode: false,
       detectedHebrewWords: [],
     }),
 }));

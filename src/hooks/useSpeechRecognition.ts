@@ -13,10 +13,12 @@ import { useWordListStore } from '../store/wordListStore';
 export function useSpeechRecognition() {
   const {
     recordingState,
+    hebrewMode,
     setRecordingState,
     addSegment,
     setInterimText,
     setDetectedLanguage,
+    setHebrewMode,
     addDetectedHebrewWord,
   } = useTranscriptionStore();
 
@@ -26,26 +28,55 @@ export function useSpeechRecognition() {
   // Handle speech recognition results
   useSpeechRecognitionEvent('result', (event) => {
     const transcript = event.results[0]?.transcript ?? '';
+    const isHebrewMode = useTranscriptionStore.getState().hebrewMode;
 
     if (event.isFinal) {
-      addSegment({
-        text: transcript,
-        language: containsHebrew(transcript) ? 'he' : 'en',
-        isFinal: true,
-        timestamp: Date.now(),
-      });
-      fullTranscriptRef.current += ' ' + transcript;
+      if (isHebrewMode) {
+        // In Hebrew mode: entire transcript is Hebrew
+        addSegment({
+          text: transcript,
+          language: 'he',
+          isFinal: true,
+          timestamp: Date.now(),
+        });
 
-      // Check for Hebrew words in final result
-      const hebrewWords = extractHebrewWords(transcript);
-      if (hebrewWords.length > 0) {
-        processHebrewWords(hebrewWords, transcript);
+        // Process all words as Hebrew
+        const words = transcript.trim().split(/\s+/).filter(Boolean);
+        if (words.length > 0) {
+          processHebrewWords(words, fullTranscriptRef.current);
+        }
+
+        // Auto-switch back to English
+        stopListening();
+        setHebrewMode(false);
+        // Restart in English after a brief delay
+        setTimeout(() => {
+          if (useTranscriptionStore.getState().recordingState === 'recording') {
+            startListening('en-US');
+          }
+        }, 300);
+      } else {
+        // Normal English mode
+        addSegment({
+          text: transcript,
+          language: containsHebrew(transcript) ? 'he' : 'en',
+          isFinal: true,
+          timestamp: Date.now(),
+        });
+        fullTranscriptRef.current += ' ' + transcript;
+
+        // Check for Hebrew words in final result (for Android native detection)
+        const hebrewWords = extractHebrewWords(transcript);
+        if (hebrewWords.length > 0) {
+          processHebrewWords(hebrewWords, transcript);
+        }
       }
     } else {
       setInterimText(transcript);
 
-      // Check interim results for Hebrew too (for UI highlighting)
-      if (containsHebrew(transcript)) {
+      if (isHebrewMode) {
+        setDetectedLanguage('he');
+      } else if (containsHebrew(transcript)) {
         setDetectedLanguage('he');
       } else {
         setDetectedLanguage('en');
@@ -64,13 +95,22 @@ export function useSpeechRecognition() {
 
   useSpeechRecognitionEvent('error', (event) => {
     console.error('Speech recognition error:', event.error);
-    setRecordingState('idle');
+    // If in Hebrew mode and error occurs, switch back to English
+    if (useTranscriptionStore.getState().hebrewMode) {
+      setHebrewMode(false);
+      if (useTranscriptionStore.getState().recordingState === 'recording') {
+        setTimeout(() => startListening('en-US'), 300);
+      }
+    } else {
+      setRecordingState('idle');
+    }
   });
 
   useSpeechRecognitionEvent('end', () => {
-    // If we're still in recording state, restart (continuous mode workaround)
-    if (useTranscriptionStore.getState().recordingState === 'recording') {
-      startListening();
+    const state = useTranscriptionStore.getState();
+    // If we're still recording and not in Hebrew mode (Hebrew mode handles its own restart)
+    if (state.recordingState === 'recording' && !state.hebrewMode) {
+      startListening('en-US');
     }
   });
 
@@ -95,7 +135,6 @@ export function useSpeechRecognition() {
           });
         } catch (error) {
           console.error('Translation error:', error);
-          // Still save the word even without translation
           await addWord({
             hebrew: word,
             english: `[${word}]`,
@@ -113,6 +152,7 @@ export function useSpeechRecognition() {
     if (recordingState === 'recording') {
       stopListening();
       setRecordingState('idle');
+      setHebrewMode(false);
     } else {
       const granted = await requestPermissions();
       if (!granted) {
@@ -121,9 +161,18 @@ export function useSpeechRecognition() {
       }
       setRecordingState('recording');
       fullTranscriptRef.current = '';
-      startListening();
+      startListening('en-US');
     }
-  }, [recordingState, setRecordingState]);
+  }, [recordingState, setRecordingState, setHebrewMode]);
 
-  return { toggleRecording, recordingState };
+  const switchToHebrew = useCallback(() => {
+    if (recordingState !== 'recording') return;
+    stopListening();
+    setHebrewMode(true);
+    setTimeout(() => {
+      startListening('he-IL');
+    }, 300);
+  }, [recordingState, setHebrewMode]);
+
+  return { toggleRecording, switchToHebrew, recordingState, hebrewMode };
 }

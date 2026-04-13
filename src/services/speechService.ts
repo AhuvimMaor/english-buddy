@@ -14,11 +14,11 @@ export async function getPermissionStatus(): Promise<boolean> {
   return result.granted;
 }
 
-export function startListening(): void {
+export function startListening(lang: 'en-US' | 'he-IL' = 'en-US'): void {
   ExpoSpeechRecognitionModule.start({
-    lang: 'en-US',
+    lang,
     interimResults: true,
-    continuous: true,
+    continuous: lang === 'en-US', // Hebrew mode: single utterance, then switch back
     ...(Platform.OS === 'android' && {
       androidIntentOptions: {
         EXTRA_ENABLE_LANGUAGE_DETECTION: true,
